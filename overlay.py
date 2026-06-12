@@ -25,12 +25,19 @@ LOG_CSV = LOG_DIR / "monitor_log.csv"
 IMG_DIR = LOG_DIR / "captures"
 IMG_DIR.mkdir(exist_ok=True)
 
+COOLDOWN_SEC = 15 * 60  # 15分
+
 RECOMMENDED_ROTATION = [
-    ("1-4",  "Lv.1+",   "Normal"),
-    ("1-9",  "Lv.1+",   "Normal"),
-    ("2-5",  "Lv.20+",  "Normal"),
-    ("L49",  "Lv.49+",  "Normal"),
-    ("L80",  "Lv.80+",  "Nightmare"),
+    ("1-1", "Lv 1",  "Normal"),
+    ("1-4", "Lv 2",  "Normal"),
+    ("1-8", "Lv 3",  "Normal"),
+    ("2-3", "Lv 15", "Normal"),
+    ("2-8", "Lv 20", "Normal"),
+    ("3-8", "Lv 30", "Normal"),
+    ("1-9", "Lv 40", "Nightmare"),
+    ("3-5", "Lv 50", "Nightmare"),
+    ("2-5", "Lv 65", "Hell"),
+    ("1-3", "Lv 80", "Torment"),
 ]
 
 NOTIF_REGION = (1548, 1185, 2360, 1230)
@@ -149,7 +156,7 @@ class Overlay:
             wy = T + 40
         else:
             wx, wy = 1080, 380
-        self.root.geometry(f"260x580+{wx}+{wy}")
+        self.root.geometry(f"270x680+{wx}+{wy}")
 
         # 状態
         self.prev_hash = ""
@@ -224,19 +231,29 @@ class Overlay:
         # ヘッダー行
         hrow = tk.Frame(self.root, bg=BG, padx=8)
         hrow.pack(fill="x")
-        tk.Label(hrow, text="ステージ", fg=DIM, bg=BG, font=fs, width=7, anchor="w").pack(side="left")
-        tk.Label(hrow, text="Lv",       fg=DIM, bg=BG, font=fs, width=7, anchor="w").pack(side="left")
-        tk.Label(hrow, text="前回",     fg=DIM, bg=BG, font=fs, anchor="w").pack(side="left")
+        tk.Label(hrow, text="Stage", fg=DIM, bg=BG, font=fs, width=6, anchor="w").pack(side="left")
+        tk.Label(hrow, text="Lv",    fg=DIM, bg=BG, font=fs, width=7, anchor="w").pack(side="left")
+        tk.Label(hrow, text="Diff",  fg=DIM, bg=BG, font=fs, width=5, anchor="w").pack(side="left")
+        tk.Label(hrow, text="残り",  fg=DIM, bg=BG, font=fs, anchor="w").pack(side="left")
+
+        DIFF_COLOR = {
+            "Normal":    GREEN,
+            "Nightmare": "#fb923c",
+            "Hell":      "#f87171",
+            "Torment":   "#c084fc",
+        }
 
         self.rot_time_labels = {}  # stage -> Label
         for stage, lv, diff in RECOMMENDED_ROTATION:
             row = tk.Frame(self.root, bg=BG, padx=8)
             row.pack(fill="x", pady=1)
-            color = "#ff6b6b" if diff == "Nightmare" else GREEN
+            dc = DIFF_COLOR.get(diff, DIM)
             tk.Label(row, text=stage, fg=GOLD, bg=BG,
-                     font=fb, width=7, anchor="w").pack(side="left")
+                     font=fb, width=6, anchor="w").pack(side="left")
             tk.Label(row, text=lv, fg=DIM, bg=BG,
                      font=fs, width=7, anchor="w").pack(side="left")
+            tk.Label(row, text=diff[:4], fg=dc, bg=BG,
+                     font=fs, width=5, anchor="w").pack(side="left")
             lbl = tk.Label(row, text="---", fg=DIM, bg=BG, font=fs, anchor="w")
             lbl.pack(side="left")
             self.rot_time_labels[stage] = lbl
@@ -313,12 +330,17 @@ class Overlay:
             if notif_txt:
                 self.lbl_notif.config(text=notif_txt)
 
-            # ローテ行の経過時間更新
+            # ローテ行の残り時間更新
             for stage, lv, diff in RECOMMENDED_ROTATION:
                 lbl = self.rot_time_labels[stage]
                 if stage in self.stage_last:
-                    elapsed = fmt_elapsed(self.stage_last[stage], ts)
-                    lbl.config(text=elapsed, fg="#facc15")
+                    elapsed_sec = int((ts - self.stage_last[stage]).total_seconds())
+                    remain = COOLDOWN_SEC - elapsed_sec
+                    if remain <= 0:
+                        lbl.config(text="OK!", fg="#4ade80")
+                    else:
+                        m, s = divmod(remain, 60)
+                        lbl.config(text=f"{m}:{s:02d}", fg="#facc15")
                 else:
                     lbl.config(text="---", fg="#888")
 
