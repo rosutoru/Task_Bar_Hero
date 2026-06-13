@@ -102,17 +102,33 @@ def img_hash(img):
     return hashlib.md5(img.tobytes()).hexdigest()
 
 
-def detect_chest(img):
+def has_banner(img):
+    """通知バナーの黒背景が存在するか（高速プレチェック）"""
     arr = img.load()
     w, h = img.size
     total = w * h
     dark = sum(1 for x in range(w) for y in range(h)
                if arr[x, y][0] < 80 and arr[x, y][1] < 80 and arr[x, y][2] < 80)
-    if dark < total * 0.1:
-        return None
-    orange = sum(1 for x in range(w) for y in range(h)
-                 if arr[x, y][0] > 200 and arr[x, y][1] > 100 and arr[x, y][2] < 80)
-    return "elite" if orange > total * 0.05 else "normal"
+    return dark > total * 0.1
+
+
+def classify_notif(text):
+    """OCRテキストから通知タイプを分類。(type, stage) を返す"""
+    # ステージクリア
+    if 'クリア' in text:
+        stage = parse_stage(text)
+        if stage:
+            return 'stage_clear', stage
+    # ステージ宝箱（ローテ対象）
+    if 'ステージ宝箱' in text and '獲得' in text:
+        return 'stage_chest', None
+    # Elite宝箱
+    if 'Elite' in text and '獲得' in text:
+        return 'elite_chest', None
+    # 一般宝箱
+    if '宝箱' in text and '獲得' in text:
+        return 'normal_chest', None
+    return None, None
 
 
 def init_log():
@@ -163,7 +179,8 @@ class Overlay:
         self.elite_count = 0
         self.normal_count = 0
         self.last_elite = None
-        self.stage_last = {}   # stage_name -> datetime
+        self.stage_last = {}      # stage_name -> datetime
+        self.current_stage = None # 最後にクリアしたステージ
 
         self._build_ui()
         init_log()
@@ -301,26 +318,42 @@ class Overlay:
         detected_stage = None
 
         if h != self.prev_hash:
-            result = detect_chest(notif_img)
-            if result in ("elite", "normal"):
-                # OCRでステージ名取得
-                if _ocr_ready:
-                    ocr = ocr_text(notif_img)
-                    detected_stage = parse_stage(ocr)
-                    if detected_stage:
-                        self.stage_last[detected_stage] = ts
-
-                if result == "elite":
-                    self.elite_count += 1
-                    self.last_elite = ts
-                    stage_str = detected_stage or "?"
-                    notif_txt = f"Elite! [{stage_str}] {ts.strftime('%H:%M:%S')}"
-                else:
-                    stage_str = detected_stage or "?"
-                    notif_txt = f"宝箱 [{stage_str}] {ts.strftime('%H:%M:%S')}"
-
-                log_event(ts, f"{result}_chest", detected_stage, notif_img)
             self.prev_hash = h
+            # バナーなしは無視
+            if not has_banner(notif_img):
+                return
+
+            # OCR未準備なら待機
+            if not _ocr_ready:
+                return
+
+            ocr = ocr_text(notif_img)
+            if not ocr:
+                return
+
+            notif_type, stage = classify_notif(ocr)
+
+            if notif_type == 'stage_clear':
+                self.current_stage = stage
+                log_event(ts, 'stage_clear', stage, notif_img)
+
+            elif notif_type == 'stage_chest':
+                if self.current_stage:
+                    self.stage_last[self.current_stage] = ts
+                self.elite_count += 1
+                self.last_elite = ts
+                stage_str = self.current_stage or "?"
+                notif_txt = f"宝箱! [{stage_str}] {ts.strftime('%H:%M:%S')}"
+                log_event(ts, 'stage_chest', self.current_stage, notif_img)
+
+            elif notif_type == 'elite_chest':
+                if self.current_stage:
+                    self.stage_last[self.current_stage] = ts
+                self.elite_count += 1
+                self.last_elite = ts
+                stage_str = self.current_stage or "?"
+                notif_txt = f"Elite! [{stage_str}] {ts.strftime('%H:%M:%S')}"
+                log_event(ts, 'elite_chest', self.current_stage, notif_img)
 
         def _ui():
             self.lbl_elite_count.config(text=f"{self.elite_count} 回")
