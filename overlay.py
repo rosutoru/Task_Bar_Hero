@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""Task Bar Hero - Overlay Widget
-ゲーム左横にリアルタイム情報を表示
-"""
+"""Task Bar Hero - Overlay Widget"""
 import tkinter as tk
 from tkinter import font as tkfont
 import threading
@@ -14,9 +12,6 @@ from PIL import ImageGrab
 import win32gui
 from pathlib import Path
 
-# ========================
-# 設定
-# ========================
 UPDATE_SEC = 3
 
 LOG_DIR = Path(__file__).parent / "logs"
@@ -24,8 +19,9 @@ LOG_DIR.mkdir(exist_ok=True)
 LOG_CSV = LOG_DIR / "monitor_log.csv"
 IMG_DIR = LOG_DIR / "captures"
 IMG_DIR.mkdir(exist_ok=True)
+DBG_LOG = LOG_DIR / "debug.log"
 
-COOLDOWN_SEC = 15 * 60  # 15分
+COOLDOWN_SEC = 15 * 60
 
 RECOMMENDED_ROTATION = [
     ("1-1", "Lv 1",  "Normal"),
@@ -41,7 +37,6 @@ RECOMMENDED_ROTATION = [
 ]
 
 NOTIF_REGION = (1548, 1185, 2360, 1230)
-
 
 # ========================
 # OCR
@@ -65,27 +60,51 @@ def ocr_text(img):
     if not _ocr_ready or _ocr_reader is None:
         return ""
     try:
-        result = _ocr_reader.readtext(img, detail=0)
+        import numpy as np
+        result = _ocr_reader.readtext(np.array(img), detail=0)
         return " ".join(result)
-    except Exception:
+    except Exception as e:
+        dbg(f"ocr_error: {e}")
         return ""
 
 
+def dbg(msg):
+    with open(DBG_LOG, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now().strftime('%H:%M:%S')} {msg}\n")
+
+
 def parse_stage(text):
-    """OCRテキストからステージ名を正規化して返す"""
-    # ハイフン付き: ステージ 3-5
-    m = re.search(r'ステージ\s*([A-Z]?\d+[-]\d+)', text)
+    """OCR誤読許容: ステージ名を抽出"""
+    # ハイフン付き: 1-8
+    m = re.search(r'(\d+[-]\d+)', text)
     if m:
         return m.group(1)
-    # Lxx形式: ステージ L49
-    m = re.search(r'ステージ\s*(L\d+)', text)
+    # L+数字: L49
+    m = re.search(r'(L\d+)', text)
     if m:
         return m.group(1)
-    # 2桁数字（ハイフン消え）: ステージ35 → 3-5
-    m = re.search(r'ステージ\s*(\d)(\d)(?:\D|$)', text)
+    # 2桁数字: 28 -> 2-8
+    m = re.search(r'(?<!\d)(\d)(\d)(?!\d)', text)
     if m:
         return f"{m.group(1)}-{m.group(2)}"
     return None
+
+
+def classify_notif(text):
+    """通知イベントのリストを返す（複数検出・誤読許容）"""
+    events = []
+    # ステージクリア
+    if 'クリア' in text:
+        stage = parse_stage(text)
+        if stage:
+            events.append(('stage_clear', stage))
+    # 宝箱取得（「得」だけで判定: 療得/撮得/獲得 すべてOK）
+    if '宝箱' in text and '得' in text:
+        if 'Elite' in text or 'エリート' in text:
+            events.append(('elite_chest', None))
+        else:
+            events.append(('stage_chest', None))
+    return events
 
 
 # ========================
@@ -103,32 +122,12 @@ def img_hash(img):
 
 
 def has_banner(img):
-    """通知バナーの黒背景が存在するか（高速プレチェック）"""
     arr = img.load()
     w, h = img.size
     total = w * h
     dark = sum(1 for x in range(w) for y in range(h)
                if arr[x, y][0] < 80 and arr[x, y][1] < 80 and arr[x, y][2] < 80)
     return dark > total * 0.1
-
-
-def classify_notif(text):
-    """OCRテキストから通知タイプを分類。(type, stage) を返す"""
-    # ステージクリア
-    if 'クリア' in text:
-        stage = parse_stage(text)
-        if stage:
-            return 'stage_clear', stage
-    # ステージ宝箱（ローテ対象）
-    if 'ステージ宝箱' in text and '獲得' in text:
-        return 'stage_chest', None
-    # Elite宝箱
-    if 'Elite' in text and '獲得' in text:
-        return 'elite_chest', None
-    # 一般宝箱
-    if '宝箱' in text and '獲得' in text:
-        return 'normal_chest', None
-    return None, None
 
 
 def init_log():
@@ -142,14 +141,15 @@ def log_event(ts, event_type, stage, img):
     img.save(str(IMG_DIR / fname))
     with open(LOG_CSV, "a", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow([ts.strftime("%Y-%m-%d %H:%M:%S"), event_type, stage or "", "", fname])
-    return fname
 
 
-def fmt_elapsed(ts, now):
-    secs = int((now - ts).total_seconds())
-    if secs < 60:
-        return f"{secs}秒前"
-    return f"{secs // 60}分{secs % 60:02d}秒前"
+def fmt_remain(ts, now):
+    elapsed = int((now - ts).total_seconds())
+    remain = COOLDOWN_SEC - elapsed
+    if remain <= 0:
+        return "OK!", "#4ade80"
+    m, s = divmod(remain, 60)
+    return f"{m}:{s:02d}", "#facc15"
 
 
 # ========================
@@ -160,7 +160,7 @@ class Overlay:
         self.root = tk.Tk()
         self.root.title("TBH Monitor")
         self.root.resizable(False, False)
-        self.root.attributes("-topmost", True)
+        self.root.attributes("-topmost", False)
         self.root.attributes("-alpha", 0.88)
         self.root.overrideredirect(True)
         self.root.configure(bg="#1a1a2e")
@@ -174,13 +174,11 @@ class Overlay:
             wx, wy = 1080, 380
         self.root.geometry(f"270x680+{wx}+{wy}")
 
-        # 状態
         self.prev_hash = ""
         self.elite_count = 0
-        self.normal_count = 0
-        self.last_elite = None
-        self.stage_last = {}      # stage_name -> datetime
-        self.current_stage = None # 最後にクリアしたステージ
+        self.stage_last = {}
+        self.current_stage = None
+        self.last_chest_ts = None
 
         self._build_ui()
         init_log()
@@ -203,7 +201,6 @@ class Overlay:
         ft = tkfont.Font(family="Segoe UI", size=11, weight="bold")
         fs = tkfont.Font(family="Segoe UI", size=8)
 
-        # ヘッダー
         hdr = tk.Frame(self.root, bg=HDR, padx=6, pady=4)
         hdr.pack(fill="x")
         tk.Label(hdr, text="Task Bar Hero Monitor",
@@ -212,40 +209,36 @@ class Overlay:
                   font=fb, cursor="hand2",
                   command=self.root.destroy).pack(side="right")
 
-        # OCRステータス
         self.lbl_ocr = tk.Label(self.root, text="OCR: 初期化中...",
                                 fg=DIM, bg=BG, font=fs, anchor="w", padx=8)
         self.lbl_ocr.pack(fill="x")
 
         tk.Frame(self.root, bg="#333", height=1).pack(fill="x")
 
-        # Elite Chest カウンター
-        tk.Label(self.root, text="[*] ELITE CHEST", fg=GOLD, bg=BG,
+        tk.Label(self.root, text="[*] CHEST", fg=GOLD, bg=BG,
                  font=fb, anchor="w", padx=8).pack(fill="x", pady=(6, 2))
 
         row2 = tk.Frame(self.root, bg=BG, padx=8)
         row2.pack(fill="x")
         tk.Label(row2, text="今セッション:", fg=DIM, bg=BG, font=f).pack(side="left")
-        self.lbl_elite_count = tk.Label(row2, text="0 回", fg=GOLD, bg=BG, font=ft)
-        self.lbl_elite_count.pack(side="left", padx=4)
+        self.lbl_count = tk.Label(row2, text="0 回", fg=GOLD, bg=BG, font=ft)
+        self.lbl_count.pack(side="left", padx=4)
 
         row3 = tk.Frame(self.root, bg=BG, padx=8)
         row3.pack(fill="x")
-        tk.Label(row3, text="前回取得:", fg=DIM, bg=BG, font=f).pack(side="left")
-        self.lbl_last_elite = tk.Label(row3, text="---", fg=TEXT, bg=BG, font=f)
-        self.lbl_last_elite.pack(side="left", padx=4)
+        tk.Label(row3, text="前回:", fg=DIM, bg=BG, font=f).pack(side="left")
+        self.lbl_last = tk.Label(row3, text="---", fg=TEXT, bg=BG, font=f)
+        self.lbl_last.pack(side="left", padx=4)
 
         self.lbl_notif = tk.Label(self.root, text="", fg=GOLD, bg=BG,
-                                  font=fs, anchor="w", padx=8, wraplength=240)
+                                  font=fs, anchor="w", padx=8, wraplength=250)
         self.lbl_notif.pack(fill="x")
 
         tk.Frame(self.root, bg="#333", height=1).pack(fill="x", pady=4)
 
-        # 推奨ローテーション（各行に経過時間追加）
         tk.Label(self.root, text="[R] 推奨ローテーション", fg=BLUE, bg=BG,
-                 font=fb, anchor="w", padx=8).pack(fill="x", pady=(0, 4))
+                 font=fb, anchor="w", padx=8).pack(fill="x", pady=(0, 2))
 
-        # ヘッダー行
         hrow = tk.Frame(self.root, bg=BG, padx=8)
         hrow.pack(fill="x")
         tk.Label(hrow, text="Stage", fg=DIM, bg=BG, font=fs, width=6, anchor="w").pack(side="left")
@@ -260,7 +253,7 @@ class Overlay:
             "Torment":   "#c084fc",
         }
 
-        self.rot_time_labels = {}  # stage -> Label
+        self.rot_time_labels = {}
         for stage, lv, diff in RECOMMENDED_ROTATION:
             row = tk.Frame(self.root, bg=BG, padx=8)
             row.pack(fill="x", pady=1)
@@ -305,75 +298,55 @@ class Overlay:
         while True:
             try:
                 self._update()
-            except Exception:
-                pass
+            except Exception as e:
+                dbg(f"update_error: {e}")
             time.sleep(UPDATE_SEC)
 
     def _update(self):
         ts = datetime.now()
-
         notif_img = ImageGrab.grab(bbox=NOTIF_REGION)
         h = img_hash(notif_img)
         notif_txt = ""
-        detected_stage = None
 
         if h != self.prev_hash:
             self.prev_hash = h
-            # バナーなしは無視
-            if not has_banner(notif_img):
-                return
+            banner = has_banner(notif_img)
+            dbg(f"hash_change banner={banner}")
 
-            # OCR未準備なら待機
-            if not _ocr_ready:
-                return
+            if banner and _ocr_ready:
+                ocr = ocr_text(notif_img)
+                events = classify_notif(ocr)
+                dbg(f"ocr=[{ocr}] events={events}")
 
-            ocr = ocr_text(notif_img)
-            if not ocr:
-                return
+                for ev_type, ev_stage in events:
+                    if ev_type == 'stage_clear':
+                        self.current_stage = ev_stage
+                        log_event(ts, 'stage_clear', ev_stage, notif_img)
 
-            notif_type, stage = classify_notif(ocr)
-
-            if notif_type == 'stage_clear':
-                self.current_stage = stage
-                log_event(ts, 'stage_clear', stage, notif_img)
-
-            elif notif_type == 'stage_chest':
-                if self.current_stage:
-                    self.stage_last[self.current_stage] = ts
-                self.elite_count += 1
-                self.last_elite = ts
-                stage_str = self.current_stage or "?"
-                notif_txt = f"宝箱! [{stage_str}] {ts.strftime('%H:%M:%S')}"
-                log_event(ts, 'stage_chest', self.current_stage, notif_img)
-
-            elif notif_type == 'elite_chest':
-                if self.current_stage:
-                    self.stage_last[self.current_stage] = ts
-                self.elite_count += 1
-                self.last_elite = ts
-                stage_str = self.current_stage or "?"
-                notif_txt = f"Elite! [{stage_str}] {ts.strftime('%H:%M:%S')}"
-                log_event(ts, 'elite_chest', self.current_stage, notif_img)
+                    elif ev_type in ('stage_chest', 'elite_chest'):
+                        if self.current_stage:
+                            self.stage_last[self.current_stage] = ts
+                        self.elite_count += 1
+                        self.last_chest_ts = ts
+                        stage_str = self.current_stage or "?"
+                        label = "Elite!" if ev_type == 'elite_chest' else "宝箱!"
+                        notif_txt = f"{label} [{stage_str}] {ts.strftime('%H:%M:%S')}"
+                        log_event(ts, ev_type, self.current_stage, notif_img)
 
         def _ui():
-            self.lbl_elite_count.config(text=f"{self.elite_count} 回")
-            if self.last_elite:
-                delta = fmt_elapsed(self.last_elite, ts)
-                self.lbl_last_elite.config(text=f"{self.last_elite.strftime('%H:%M:%S')} ({delta})")
+            self.lbl_count.config(text=f"{self.elite_count} 回")
+            if self.last_chest_ts:
+                elapsed = int((ts - self.last_chest_ts).total_seconds())
+                self.lbl_last.config(
+                    text=f"{self.last_chest_ts.strftime('%H:%M:%S')} ({elapsed}秒前)")
             if notif_txt:
                 self.lbl_notif.config(text=notif_txt)
 
-            # ローテ行の残り時間更新
             for stage, lv, diff in RECOMMENDED_ROTATION:
                 lbl = self.rot_time_labels[stage]
                 if stage in self.stage_last:
-                    elapsed_sec = int((ts - self.stage_last[stage]).total_seconds())
-                    remain = COOLDOWN_SEC - elapsed_sec
-                    if remain <= 0:
-                        lbl.config(text="OK!", fg="#4ade80")
-                    else:
-                        m, s = divmod(remain, 60)
-                        lbl.config(text=f"{m}:{s:02d}", fg="#facc15")
+                    text, color = fmt_remain(self.stage_last[stage], ts)
+                    lbl.config(text=text, fg=color)
                 else:
                     lbl.config(text="---", fg="#888")
 
